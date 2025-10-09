@@ -6,7 +6,8 @@ from sqlalchemy import (
     String,
     ForeignKey,
     DateTime,
-    JSON
+    JSON,
+    Boolean
 )
 from sqlalchemy.orm import relationship, declarative_base
 
@@ -38,7 +39,7 @@ class Match(Base):
     __tablename__ = "matches"
     id = Column(Integer, primary_key=True, index=True)
     # The unique ID from Liquipedia to prevent duplicate entries.
-    liquipedia_id = Column(Integer, unique=True, nullable=False) 
+    liquipedia_id = Column(Integer, nullable=False) 
     
     tournament_id = Column(Integer, ForeignKey("tournaments.id"))
     
@@ -72,16 +73,17 @@ class Match(Base):
 # --- Association Table for Picks/Bans ---
 class MatchHero(Base):
     __tablename__ = "match_heroes"
-    # --- THIS IS THE DEFINITIVE PRIMARY KEY ---
-    # By including game_number, each record is now unique to a specific game.
     match_id = Column(Integer, ForeignKey("matches.id"), primary_key=True)
     hero_id = Column(Integer, ForeignKey("heroes.id"), primary_key=True)
     team_id = Column(Integer, ForeignKey("teams.id"), primary_key=True)
-    type = Column(String, primary_key=True)
-    game_number = Column(Integer, primary_key=True) # This will store 'match2gameid'
-    # ---------------------------------------------
+    type = Column(String, primary_key=True) # 'pick' or 'ban'
+    game_number = Column(Integer, primary_key=True)
+    is_win = Column(Boolean)
+    
+    # --- ADD THIS NEW COLUMN ---
+    side = Column(String) # Will store 'blue' or 'red'
+    # ---------------------------
 
-    # --- Relationships ---
     match = relationship("Match", back_populates="heroes")
     hero = relationship("Hero")
     team = relationship("Team")
