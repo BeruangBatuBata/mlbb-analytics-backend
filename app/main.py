@@ -1,5 +1,5 @@
 # In app/main.py
-from fastapi import FastAPI, Depends, Query
+from fastapi import FastAPI, Depends, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from . import models, crud, schemas
@@ -90,3 +90,30 @@ async def receive_liquipedia_webhook(payload: schemas.LiquipediaWebhookPayload):
     process_liquipedia_update.delay(payload.page, tournament_name)
     
     return {"message": "Webhook received and task queued."}
+
+@app.get("/api/heroes/{hero_name}", response_model=schemas.HeroDetails)
+def get_hero_details_endpoint(
+    hero_name: str = Path(..., title="The name of the hero to retrieve details for"),
+    db: Session = Depends(get_db),
+    tournaments: Optional[List[str]] = Query(None),
+    stages: Optional[List[str]] = Query(None),
+    teams: Optional[List[str]] = Query(None)
+):
+    """
+    API endpoint to get detailed statistics for a single hero, including
+    performance by team and matchups against other heroes.
+    """
+    return crud.get_hero_details(
+        db, 
+        hero_name=hero_name,
+        tournament_names=tournaments, 
+        stage_names=stages, 
+        team_names=teams
+    )
+
+@app.get("/api/heroes", response_model=list[str])
+def get_all_heroes_endpoint(db: Session = Depends(get_db)):
+    """API endpoint to get a list of all hero names for navigation."""
+    results = crud.get_all_hero_names(db)
+    # The query returns tuples, so we extract the first element of each
+    return [item[0] for item in results]

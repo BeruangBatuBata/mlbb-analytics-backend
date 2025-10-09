@@ -1,6 +1,6 @@
 # In app/crud.py
 from sqlalchemy.orm import Session
-from sqlalchemy import func, case, select, and_
+from sqlalchemy import func, case, select, and_, or_
 from . import models
 from typing import List, Optional
 
@@ -264,3 +264,95 @@ def get_all_stages(db: Session, tournament_names: Optional[List[str]] = None):
         
     distinct_stages = query.distinct().order_by("stage")
     return [row.stage for row in distinct_stages if row.stage]
+
+def get_hero_details(
+    db: Session,
+    hero_name: str,
+    tournament_names: Optional[List[str]] = None,
+    stage_names: Optional[List[str]] = None,
+    team_names: Optional[List[str]] = None
+):
+    """
+    Retrieves detailed statistics for a specific hero. (DEFINITIVE CORRECTED VERSION)
+    """
+    # Base query for filtering matches
+    matches_query = db.query(models.Match.id).filter(models.Match.winner_id != None)
+    if tournament_names:
+        matches_query = matches_query.join(models.Tournament).filter(models.Tournament.name.in_(tournament_names))
+    if stage_names:
+        matches_query = matches_query.filter(models.Match.details['stage_type'].as_string().in_(stage_names))
+    if team_names:
+        team_ids_query = db.query(models.Team.id).filter(models.Team.name.in_(team_names))
+        team_ids = [id_tuple[0] for id_tuple in team_ids_query.all()]
+        if team_ids:
+            matches_query = matches_query.filter(or_(models.Match.team1_id.in_(team_ids), models.Match.team2_id.in_(team_ids)))
+    
+    filtered_matches_subquery = matches_query.subquery()
+
+    hero = db.query(models.Hero).filter(models.Hero.name == hero_name).first()
+    if not hero:
+        return {"by_team": [], "vs_opponents": []}
+
+    # Query 1: Performance by Team
+    team_performance_results = (
+        db.query(
+            models.Team.name,
+            func.count(models.MatchHero.hero_id).label("games_played"), # FIXED
+            func.sum(case((models.MatchHero.is_win == True, 1), else_=0)).label("wins")
+        )
+        .join(models.MatchHero, models.Team.id == models.MatchHero.team_id)
+        .filter(models.MatchHero.match_id.in_(select(filtered_matches_subquery)))
+        .filter(models.MatchHero.hero_id == hero.id)
+        .filter(models.MatchHero.type == 'pick')
+        .group_by(models.Team.name)
+        .order_by(func.count(models.MatchHero.hero_id).desc()) # FIXED
+        .all()
+    )
+    by_team_stats = [
+        {"team_name": name, "games_played": games, "wins": wins, "win_rate": (wins / games * 100) if games > 0 else 0}
+        for name, games, wins in team_performance_results
+    ]
+
+    # Query 2: Performance vs. Opponents
+    HeroPick = models.MatchHero.__table__.alias('hero_pick')
+    OpponentPick = models.MatchHero.__table__.alias('opponent_pick')
+    
+    hero_games = (
+        select(HeroPick.c.match_id, HeroPick.c.game_number, HeroPick.c.team_id, HeroPick.c.is_win)
+        .where(HeroPick.c.hero_id == hero.id)
+        .where(HeroPick.c.type == 'pick')
+        .where(HeroPick.c.match_id.in_(select(filtered_matches_subquery)))
+        .subquery()
+    )
+
+    matchups = (
+        db.query(
+            models.Hero.name,
+            func.count(OpponentPick.c.hero_id).label("games_faced"), # FIXED
+            func.sum(case((hero_games.c.is_win == True, 1), else_=0)).label("wins_against")
+        )
+        .join(OpponentPick, models.Hero.id == OpponentPick.c.hero_id)
+        .join(
+            hero_games,
+            and_(
+                OpponentPick.c.match_id == hero_games.c.match_id,
+                OpponentPick.c.game_number == hero_games.c.game_number,
+                OpponentPick.c.team_id != hero_games.c.team_id
+            )
+        )
+        .filter(OpponentPick.c.type == 'pick')
+        .group_by(models.Hero.name)
+        .order_by(func.count(OpponentPick.c.hero_id).desc()) # FIXED
+        .all()
+    )
+    
+    vs_opponents_stats = [
+        {"opponent_hero_name": name, "games_faced": games, "wins_against": wins, "win_rate_vs": (wins / games * 100) if games > 0 else 0}
+        for name, games, wins in matchups
+    ]
+
+    return {"by_team": by_team_stats, "vs_opponents": vs_opponents_stats}
+
+def get_all_hero_names(db: Session):
+    """Retrieves a list of all hero names, sorted alphabetically."""
+    return db.query(models.Hero.name).order_by(models.Hero.name).all()
