@@ -2,61 +2,83 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case, select, and_, or_
 from . import models
-from typing import List, Optional
+from typing import Dict, List, Any, Optional
 
-def update_match(db: Session, match_data: dict):
+def update_tournament_and_match(db: Session, match_data: dict, region: str, split: str):
     """
-    Final definitive version. This version adds a guard clause to reject
-    any match from the API that is missing a team name.
+    Creates or updates a tournament and processes the associated match data.
+    (This is the complete, corrected version with hero processing)
     """
     try:
-        # Step 1: Resolve dependencies (Teams, Tournament)
+        # Step 1: Find or create the tournament
+        tournament_name = match_data.get('tournament', 'Unknown Tournament')
+        tournament = db.query(models.Tournament).filter_by(name=tournament_name).first()
+        if not tournament:
+            tournament = models.Tournament(name=tournament_name, region=region, split=split)
+            db.add(tournament)
+            db.flush()
+        
+        # Step 2: Find or create the teams
         team1_name, team2_name = None, None
         if 'match2opponents' in match_data and len(match_data['match2opponents']) >= 2:
             team1_name = match_data['match2opponents'][0].get('name')
             team2_name = match_data['match2opponents'][1].get('name')
 
-        # --- THIS IS THE CRITICAL FIX ---
-        # If either team name is missing (None or empty string), skip this match.
-        if not team1_name or not team2_name:
-            print(f"  - WARNING: Skipping match with Liquipedia ID {match_data.get('pageid', 'N/A')} due to missing team name.")
-            return None
-        # --------------------------------
+        if not team1_name or not team2_name: return None
 
         team1 = db.query(models.Team).filter_by(name=team1_name).first()
         if not team1: team1 = models.Team(name=team1_name); db.add(team1)
         
         team2 = db.query(models.Team).filter_by(name=team2_name).first()
         if not team2: team2 = models.Team(name=team2_name); db.add(team2)
-
-        tournament_name = match_data.get('tournament', 'Unknown Tournament')
-        tournament = db.query(models.Tournament).filter_by(name=tournament_name).first()
-        if not tournament:
-            tournament = models.Tournament(name=tournament_name)
-            db.add(tournament)
         
         db.flush()
 
-        # Step 2: Find or create the match
+        # Step 3: Find or create the match
         match = db.query(models.Match).filter(and_(models.Match.team1_id == team1.id, models.Match.team2_id == team2.id, models.Match.match_date == match_data.get('date'))).first()
         series_winner = team1 if match_data.get('winner') == '1' else team2 if match_data.get('winner') == '2' else None
+        
         if not match:
-            match = models.Match(liquipedia_id=match_data['pageid'], tournament_id=tournament.id, team1_id=team1.id, team2_id=team2.id, winner_id=series_winner.id if series_winner else None, team1_score=match_data.get('team1score'), team2_score=match_data.get('team2score'), match_date=match_data.get('date'), details=match_data)
+            match = models.Match(liquipedia_id=match_data.get('pageid', 'N/A'), tournament_id=tournament.id, team1_id=team1.id, team2_id=team2.id, winner_id=series_winner.id if series_winner else None, team1_score=match_data.get('team1score'), team2_score=match_data.get('team2score'), match_date=match_data.get('date'), details=match_data)
             db.add(match)
         else:
             match.winner_id = series_winner.id if series_winner else None; match.team1_score = match_data.get('team1score'); match.team2_score = match_data.get('team2score'); match.details = match_data
+        
         db.flush()
 
-        # Step 3: Process heroes and game data
+        # --- THIS IS THE MISSING LOGIC ---
+        # Step 4: Process heroes and game data (picks/bans)
+        
+        # Clear old hero data for this match to prevent duplicates on re-runs
         db.query(models.MatchHero).filter(models.MatchHero.match_id == match.id).delete(synchronize_session=False)
-        all_hero_names = {extradata[f'team{tn}ban{i}'] for game in match_data.get('match2games', []) if isinstance(game, dict) for extradata in [game.get('extradata', {})] if isinstance(extradata, dict) for i in range(1, 6) for tn in [1, 2] if extradata.get(f'team{tn}ban{i}')}
-        all_hero_names.update({p_data['champion'] for game in match_data.get('match2games', []) if isinstance(game, dict) for p_data in game.get('participants', {}).values() if isinstance(p_data, dict) and p_data.get('champion')})
-        hero_map = {h.name: h for h in db.query(models.Hero).filter(models.Hero.name.in_(all_hero_names)).all()}
+
+        # Gather all unique hero names from picks and bans in the match data
+        all_hero_names = set()
+        for game in match_data.get('match2games', []):
+            if not isinstance(game, dict): continue
+            extradata = game.get('extradata', {})
+            if isinstance(extradata, dict):
+                for i in range(1, 6):
+                    for team_num_str in ['1', '2']:
+                        ban_hero = extradata.get(f'team{team_num_str}ban{i}')
+                        if ban_hero: all_hero_names.add(ban_hero)
+            
+            for opp_data in game.get('opponents', []):
+                for p in opp_data.get('players', []):
+                    if isinstance(p, dict) and "champion" in p:
+                        all_hero_names.add(p['champion'])
+        
+        # Ensure all heroes exist in the 'heroes' table, creating them if necessary
+        existing_heroes = {h.name for h in db.query(models.Hero).filter(models.Hero.name.in_(all_hero_names)).all()}
         for name in all_hero_names:
-            if name not in hero_map: db.add(models.Hero(name=name))
-        db.flush()
+            if name not in existing_heroes:
+                db.add(models.Hero(name=name))
+        if all_hero_names - existing_heroes:
+             db.flush()
+
         hero_map = {h.name: h for h in db.query(models.Hero).filter(models.Hero.name.in_(all_hero_names)).all()}
 
+        # Process each game in the match to save pick/ban data
         unique_hero_actions = set()
         for game_index, game in enumerate(match_data.get('match2games', [])):
             game_num = game_index + 1
@@ -65,34 +87,32 @@ def update_match(db: Session, match_data: dict):
             game_winner_team = team1 if game.get('winner') == '1' else team2 if game.get('winner') == '2' else None
             extradata = game.get('extradata', {})
             blue_team = team1 if extradata.get('team1side') == 'blue' else team2 if extradata.get('team2side') == 'blue' else None
-            red_team = team1 if extradata.get('team1side') == 'red' else team2 if extradata.get('team2side') == 'red' else None
             
+            # Bans
             if isinstance(extradata, dict):
                 for i in range(1, 6):
-                    for team_num in [1, 2]:
-                        ban_key = f'team{team_num}ban{i}'
-                        if extradata.get(ban_key) and extradata[ban_key] in hero_map:
-                            hero_id = hero_map[extradata[ban_key]].id
-                            team_id = team1.id if team_num == 1 else team2.id
-                            unique_hero_actions.add((hero_id, team_id, 'ban', game_num, None, None))
+                    for team_num, team_obj in [('1', team1), ('2', team2)]:
+                        ban_hero_name = extradata.get(f'team{team_num}ban{i}')
+                        if ban_hero_name in hero_map:
+                            hero_id = hero_map[ban_hero_name].id
+                            unique_hero_actions.add((hero_id, team_obj.id, 'ban', game_num, None, None))
 
-            participants = game.get('participants', {})
-            if isinstance(participants, dict):
-                for key, data in participants.items():
-                    if isinstance(data, dict) and data.get('champion') and data['champion'] in hero_map:
-                        team_num_str, _ = key.split('_')
-                        picking_team = team1 if int(team_num_str) == 1 else team2
-                        is_win = (picking_team == game_winner_team) if game_winner_team else None
-                        side = 'blue' if picking_team == blue_team else 'red' if picking_team == red_team else None
-                        hero_id = hero_map[data['champion']].id
+            # Picks
+            for idx, opp_data in enumerate(game.get('opponents', [])):
+                picking_team = team1 if idx == 0 else team2
+                is_win = (picking_team == game_winner_team) if game_winner_team else None
+                side = 'blue' if picking_team == blue_team else 'red'
+                
+                for p in opp_data.get('players', []):
+                    if isinstance(p, dict) and p.get('champion') in hero_map:
+                        hero_id = hero_map[p['champion']].id
                         unique_hero_actions.add((hero_id, picking_team.id, 'pick', game_num, is_win, side))
-        
+
+        # Add all unique actions to the session
         for hero_id, team_id, action_type, game_num, is_win_flag, side_flag in unique_hero_actions:
-            db.add(models.MatchHero(
-                match_id=match.id, hero_id=hero_id, team_id=team_id, 
-                type=action_type, game_number=game_num, is_win=is_win_flag, side=side_flag
-            ))
-        
+            db.add(models.MatchHero(match_id=match.id, hero_id=hero_id, team_id=team_id, type=action_type, game_number=game_num, is_win=is_win_flag, side=side_flag))
+        # --- END OF MISSING LOGIC ---
+
         db.commit()
     except Exception as e:
         db.rollback(); raise
@@ -226,29 +246,69 @@ def get_hero_stats(
     summary = { "total_matches": total_matches, "total_games": total_games, "total_heroes": len(hero_stats), "most_picked": max(hero_stats, key=lambda x: x['picks']) if hero_stats else None, "highest_win_rate": max([h for h in hero_stats if h['picks'] >= 5], key=lambda x: x['win_rate']) if any(h['picks'] >= 5 for h in hero_stats) else None, }
     return {"summary": summary, "heroes": hero_stats}
 
-def get_all_tournaments(db: Session):
-    return db.query(models.Tournament).order_by(models.Tournament.name).all()
+def get_all_tournaments_grouped(db: Session, group_by: str) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Retrieves all tournaments, grouped by either 'split' or 'region'.
+    """
+    if group_by not in ['split', 'region']:
+        group_by = 'split' # Default safely
 
-def get_all_teams(db: Session, tournament_names: Optional[List[str]] = None):
+    tournaments = db.query(models.Tournament).order_by(
+        getattr(models.Tournament, group_by).desc(), 
+        models.Tournament.name
+    ).all()
+
+    grouped_tournaments = {}
+    for t in tournaments:
+        key = getattr(t, group_by) or "Uncategorized"
+        if key not in grouped_tournaments:
+            grouped_tournaments[key] = []
+        grouped_tournaments[key].append({"id": t.id, "name": t.name})
+    
+    return grouped_tournaments
+
+def get_all_teams(
+    db: Session, 
+    tournament_names: Optional[List[str]] = None,
+    hero_name: Optional[str] = None
+):
     """
-    Retrieves teams. If tournament_names are provided, it returns only the teams
-    that played in those tournaments. Otherwise, it returns all teams.
+    Retrieves teams that have played in at least one completed match.
+    Can be filtered by tournaments or by a hero.
     """
-    query = db.query(models.Team)
-    if tournament_names:
-        # Find matches in the selected tournaments
-        matches_in_tournaments = (
-            db.query(models.Match.id)
-            .join(models.Tournament)
-            .filter(models.Tournament.name.in_(tournament_names))
-            .subquery()
+    # --- THIS IS THE CRITICAL FIX ---
+    # The base query now joins with the matches table and filters for completed matches,
+    # ensuring we only ever return teams that have actually played.
+    query = (
+        db.query(models.Team)
+        .join(
+            models.Match,
+            or_(models.Team.id == models.Match.team1_id, models.Team.id == models.Match.team2_id)
         )
-        # Find unique team IDs from those matches
-        team1_ids = db.query(models.Match.team1_id).filter(models.Match.id.in_(select(matches_in_tournaments)))
-        team2_ids = db.query(models.Match.team2_id).filter(models.Match.id.in_(select(matches_in_tournaments)))
-        all_team_ids = team1_ids.union(team2_ids).distinct()
-        
-        query = query.filter(models.Team.id.in_([t[0] for t in all_team_ids.all()]))
+        .filter(models.Match.winner_id != None)
+        .distinct()
+    )
+    # --- END OF FIX ---
+
+    if hero_name:
+        # If a hero name is provided, find teams that have picked that hero
+        hero = db.query(models.Hero).filter(models.Hero.name == hero_name).first()
+        if hero:
+            team_ids_with_hero = (
+                db.query(models.MatchHero.team_id)
+                .filter(models.MatchHero.hero_id == hero.id)
+                .filter(models.MatchHero.type == 'pick')
+                .distinct()
+            )
+            # Further filter the base query
+            query = query.filter(models.Team.id.in_([t[0] for t in team_ids_with_hero.all()]))
+    
+    elif tournament_names:
+        # Further filter the base query by tournament
+        query = query.join(
+            models.Tournament, 
+            models.Match.tournament_id == models.Tournament.id
+        ).filter(models.Tournament.name.in_(tournament_names))
 
     return query.order_by(models.Team.name).all()
 
@@ -273,19 +333,26 @@ def get_hero_details(
     team_names: Optional[List[str]] = None
 ):
     """
-    Retrieves detailed statistics for a specific hero. (DEFINITIVE CORRECTED VERSION)
+    Retrieves detailed statistics for a specific hero. (CORRECTED with team filter fix)
     """
-    # Base query for filtering matches
+    # --- THIS IS THE CRITICAL FIX ---
+    # We need to get the team_ids early to use them in two places.
+    team_ids = []
+    if team_names:
+        team_ids_query = db.query(models.Team.id).filter(models.Team.name.in_(team_names))
+        team_ids = [id_tuple[0] for id_tuple in team_ids_query.all()]
+    # --- END OF FIX ---
+
+    # Base query for filtering matches based on user selection
     matches_query = db.query(models.Match.id).filter(models.Match.winner_id != None)
     if tournament_names:
         matches_query = matches_query.join(models.Tournament).filter(models.Tournament.name.in_(tournament_names))
     if stage_names:
         matches_query = matches_query.filter(models.Match.details['stage_type'].as_string().in_(stage_names))
-    if team_names:
-        team_ids_query = db.query(models.Team.id).filter(models.Team.name.in_(team_names))
-        team_ids = [id_tuple[0] for id_tuple in team_ids_query.all()]
-        if team_ids:
-            matches_query = matches_query.filter(or_(models.Match.team1_id.in_(team_ids), models.Match.team2_id.in_(team_ids)))
+    
+    # Filter matches by the selected teams
+    if team_ids:
+        matches_query = matches_query.filter(or_(models.Match.team1_id.in_(team_ids), models.Match.team2_id.in_(team_ids)))
     
     filtered_matches_subquery = matches_query.subquery()
 
@@ -294,29 +361,34 @@ def get_hero_details(
         return {"by_team": [], "vs_opponents": []}
 
     # Query 1: Performance by Team
-    team_performance_results = (
+    team_perf_query = (
         db.query(
             models.Team.name,
-            func.count(models.MatchHero.hero_id).label("games_played"), # FIXED
+            func.count(models.MatchHero.hero_id).label("games_played"),
             func.sum(case((models.MatchHero.is_win == True, 1), else_=0)).label("wins")
         )
         .join(models.MatchHero, models.Team.id == models.MatchHero.team_id)
         .filter(models.MatchHero.match_id.in_(select(filtered_matches_subquery)))
         .filter(models.MatchHero.hero_id == hero.id)
         .filter(models.MatchHero.type == 'pick')
-        .group_by(models.Team.name)
-        .order_by(func.count(models.MatchHero.hero_id).desc()) # FIXED
-        .all()
     )
+
+    # --- THIS IS THE CRITICAL FIX ---
+    # Apply the team filter to the final aggregation as well.
+    if team_ids:
+        team_perf_query = team_perf_query.filter(models.Team.id.in_(team_ids))
+    # --- END OF FIX ---
+
+    team_performance_results = team_perf_query.group_by(models.Team.name).order_by(func.count(models.MatchHero.hero_id).desc()).all()
+
     by_team_stats = [
         {"team_name": name, "games_played": games, "wins": wins, "win_rate": (wins / games * 100) if games > 0 else 0}
         for name, games, wins in team_performance_results
     ]
 
-    # Query 2: Performance vs. Opponents
+    # Query 2: Performance vs. Opponents (remains the same)
     HeroPick = models.MatchHero.__table__.alias('hero_pick')
     OpponentPick = models.MatchHero.__table__.alias('opponent_pick')
-    
     hero_games = (
         select(HeroPick.c.match_id, HeroPick.c.game_number, HeroPick.c.team_id, HeroPick.c.is_win)
         .where(HeroPick.c.hero_id == hero.id)
@@ -324,11 +396,10 @@ def get_hero_details(
         .where(HeroPick.c.match_id.in_(select(filtered_matches_subquery)))
         .subquery()
     )
-
     matchups = (
         db.query(
             models.Hero.name,
-            func.count(OpponentPick.c.hero_id).label("games_faced"), # FIXED
+            func.count(OpponentPick.c.hero_id).label("games_faced"),
             func.sum(case((hero_games.c.is_win == True, 1), else_=0)).label("wins_against")
         )
         .join(OpponentPick, models.Hero.id == OpponentPick.c.hero_id)
@@ -342,10 +413,9 @@ def get_hero_details(
         )
         .filter(OpponentPick.c.type == 'pick')
         .group_by(models.Hero.name)
-        .order_by(func.count(OpponentPick.c.hero_id).desc()) # FIXED
+        .order_by(func.count(OpponentPick.c.hero_id).desc())
         .all()
     )
-    
     vs_opponents_stats = [
         {"opponent_hero_name": name, "games_faced": games, "wins_against": wins, "win_rate_vs": (wins / games * 100) if games > 0 else 0}
         for name, games, wins in matchups

@@ -1,22 +1,24 @@
-// In mlbb-analytics-frontend/app/statistics/page.tsx
-
 "use client";
 
 import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
-import { useFilters } from '@/context/FilterContext';
+import { useFilters, GroupingMode } from '@/context/FilterContext';
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Check, ChevronsUpDown, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { TwoPanelSelector } from '@/app/components/TwoPanelSelector';
 
-// Type Definitions
+// --- Type Definitions ---
 interface HeroStat { hero_name: string; picks: number; bans: number; wins: number; losses: number; pick_rate: number; ban_rate: number; presence: number; win_rate: number; blue_picks: number; blue_wins: number; red_picks: number; red_wins: number; }
 interface SummaryStats { total_matches?: number; total_games?: number; total_heroes?: number; most_picked?: HeroStat; highest_win_rate?: HeroStat; }
 interface Tournament { id: number; name: string; }
 interface Team { id: number; name: string; }
+type GroupedTournaments = Record<string, Tournament[]>;
 
+// --- Reusable Components ---
 const StatCard = ({ title, value, subValue }: { title: string; value: string | number; subValue?: string }) => (
   <div className="bg-gray-800 p-4 rounded-lg shadow-md h-full">
     <p className="text-sm text-gray-400">{title}</p>
@@ -25,14 +27,14 @@ const StatCard = ({ title, value, subValue }: { title: string; value: string | n
   </div>
 );
 
+// --- Main Page Component ---
 export default function StatisticsPage() {
   const [heroStats, setHeroStats] = useState<HeroStat[]>([]);
   const [summary, setSummary] = useState<SummaryStats>({});
-  const [allTournaments, setAllTournaments] = useState<Tournament[]>([]);
-  const [allTeams, setAllTeams] = useState<Team[]>([]);
+  const [groupedTournaments, setGroupedTournaments] = useState<GroupedTournaments>({});
   const [stageOptions, setStageOptions] = useState<string[]>([]);
   const [teamOptions, setTeamOptions] = useState<Team[]>([]);
-  const { selectedTournaments, setSelectedTournaments, selectedStages, setSelectedStages, selectedTeams, setSelectedTeams } = useFilters();
+  const { selectedTournaments, setSelectedTournaments, selectedStages, setSelectedStages, selectedTeams, setSelectedTeams, groupingMode, setGroupingMode } = useFilters();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
@@ -43,34 +45,34 @@ export default function StatisticsPage() {
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
   useEffect(() => {
-    async function fetchInitialOptions() {
+    async function fetchGroupedTournaments() {
       try {
-        const [tournamentsRes, teamsRes] = await Promise.all([fetch(`${apiUrl}/api/tournaments`), fetch(`${apiUrl}/api/teams`)]);
-        if (!tournamentsRes.ok || !teamsRes.ok) throw new Error('Failed to fetch initial filter data');
-        const tournamentsData = await tournamentsRes.json();
-        const teamsData = await teamsRes.json();
-        setAllTournaments(tournamentsData);
-        setAllTeams(teamsData);
-        setTeamOptions(teamsData);
+        const response = await fetch(`${apiUrl}/api/tournaments?group_by=${groupingMode}`);
+        if (!response.ok) throw new Error('Failed to fetch tournaments');
+        const data = await response.json();
+        setGroupedTournaments(data);
       } catch (e) { console.error(e); }
     }
-    fetchInitialOptions();
-  }, [apiUrl]);
+    fetchGroupedTournaments();
+  }, [groupingMode, apiUrl]);
 
   useEffect(() => {
     const tournamentNames = selectedTournaments.map(t => t.name);
     if (tournamentNames.length === 0) {
       setStageOptions([]);
       setSelectedStages([]);
-      setTeamOptions(allTeams);
-      setSelectedTeams(prev => prev.filter(selectedTeam => allTeams.some(option => option.id === selectedTeam.id)));
+      setTeamOptions([]);
+      setSelectedTeams([]);
       return;
     }
     async function fetchContextualOptions() {
       const params = new URLSearchParams();
       tournamentNames.forEach(name => params.append('tournaments', name));
       try {
-        const [stagesRes, teamsRes] = await Promise.all([fetch(`${apiUrl}/api/stages?${params.toString()}`), fetch(`${apiUrl}/api/teams?${params.toString()}`)]);
+        const [stagesRes, teamsRes] = await Promise.all([
+          fetch(`${apiUrl}/api/stages?${params.toString()}`),
+          fetch(`${apiUrl}/api/teams?${params.toString()}`)
+        ]);
         if (!stagesRes.ok || !teamsRes.ok) throw new Error('Failed to fetch contextual filter data');
         const newStageOptions: string[] = await stagesRes.json();
         const newTeamOptions: Team[] = await teamsRes.json();
@@ -81,7 +83,7 @@ export default function StatisticsPage() {
       } catch (e) { console.error(e); }
     }
     fetchContextualOptions();
-  }, [selectedTournaments, allTeams, apiUrl, setSelectedStages, setSelectedTeams]);
+  }, [selectedTournaments, apiUrl, setSelectedStages, setSelectedTeams]);
 
   useEffect(() => {
     async function fetchStats() {
@@ -106,7 +108,9 @@ export default function StatisticsPage() {
   }, [selectedTournaments, selectedStages, selectedTeams, apiUrl]);
 
   const processedStats = useMemo(() => {
-    return [...heroStats].filter(s => s.hero_name.toLowerCase().includes(filter.toLowerCase())).sort((a, b) => {
+    const stats = heroStats || [];
+    const filtered = filter ? stats.filter(s => s.hero_name.toLowerCase().includes(filter.toLowerCase())) : stats;
+    return [...filtered].sort((a, b) => {
         if (sortColumn === 'blue_win_rate') {
             const aVal = a.blue_picks > 0 ? (a.blue_wins / a.blue_picks) : 0;
             const bVal = b.blue_picks > 0 ? (b.blue_wins / b.blue_picks) : 0;
@@ -134,27 +138,28 @@ export default function StatisticsPage() {
   const handleTeamSelect = (team: Team) => setSelectedTeams(prev => prev.some(t => t.id === team.id) ? prev.filter(t => t.id !== team.id) : [...prev, team]);
 
   return (
-    <main className="container mx-auto p-4 md:p-8">
-       <h1 className="text-3xl font-bold mb-2 text-center">Statistics Breakdown</h1>
-      <p className="text-center text-gray-400 mb-6">Analyze the meta by filtering by tournaments, stages, and teams.</p>
+    <main>
+      <h1 className="text-3xl font-bold mb-6 text-center">Statistics Breakdown</h1>
       
+      <div className="flex justify-center items-center gap-2 mb-4">
+        <span className="text-sm text-gray-400">Group By:</span>
+        <Button variant={groupingMode === 'split' ? 'secondary' : 'ghost'} size="sm" onClick={() => setGroupingMode('split')}>Split</Button>
+        <Button variant={groupingMode === 'region' ? 'secondary' : 'ghost'} size="sm" onClick={() => setGroupingMode('region')}>Region</Button>
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <Popover><PopoverTrigger asChild>
-            <button className="justify-between w-full px-4 py-2 text-left font-normal bg-gray-800 border border-gray-600 rounded-md flex items-center">
-                <span className="truncate pr-2">{selectedTournaments.length > 0 ? `${selectedTournaments.length} tournament(s) selected` : "Filter by Tournament..."}</span><ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-            </button>
-        </PopoverTrigger><PopoverContent className="w-[--radix-popover-trigger-width] p-0 bg-gray-800 border-gray-600"><Command><CommandInput placeholder="Search..." /><CommandList><CommandEmpty>No results found.</CommandEmpty><CommandGroup>
-            {allTournaments.map((t) => (<CommandItem key={t.id} onSelect={() => handleTournamentSelect(t)} className="aria-selected:bg-gray-700">
-                <Check className={cn("mr-2 h-4 w-4", selectedTournaments.some(st => st.id === t.id) ? "opacity-100" : "opacity-0")} />{t.name}
-            </CommandItem>))}
-        </CommandGroup></CommandList></Command></PopoverContent></Popover>
+        <TwoPanelSelector
+          groupedTournaments={groupedTournaments}
+          selectedTournaments={selectedTournaments}
+          onSelectionChange={setSelectedTournaments}
+        />
 
         <Popover><PopoverTrigger asChild>
              <button disabled={isStageFilterDisabled} className="justify-between w-full px-4 py-2 text-left font-normal bg-gray-800 border border-gray-600 rounded-md flex items-center disabled:opacity-50 disabled:cursor-not-allowed">
                 <span className="truncate pr-2">{selectedStages.length > 0 ? `${selectedStages.length} stage(s) selected` : "Filter by Stage..."}</span><ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
             </button>
-        </PopoverTrigger><PopoverContent className="w-[--radix-popover-trigger-width] p-0 bg-gray-800 border-gray-600"><Command><CommandInput placeholder="Search..." /><CommandList><CommandEmpty>No stages found for this tournament.</CommandEmpty><CommandGroup>
-            {stageOptions.map((s) => (<CommandItem key={s} onSelect={() => handleStageSelect(s)} className="aria-selected:bg-gray-700">
+        </PopoverTrigger><PopoverContent className="w-[--radix-popover-trigger-width] p-0 bg-gray-800 border-gray-600"><Command><CommandInput placeholder="Search..." /><CommandList><CommandEmpty>No stages found.</CommandEmpty><CommandGroup>
+            {stageOptions.map(s => (<CommandItem key={s} onSelect={() => handleStageSelect(s)}>
                 <Check className={cn("mr-2 h-4 w-4", selectedStages.includes(s) ? "opacity-100" : "opacity-0")} />{s}
             </CommandItem>))}
         </CommandGroup></CommandList></Command></PopoverContent></Popover>
@@ -164,7 +169,7 @@ export default function StatisticsPage() {
                 <span className="truncate pr-2">{selectedTeams.length > 0 ? `${selectedTeams.length} team(s) selected` : "Filter by Team..."}</span><ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
             </button>
         </PopoverTrigger><PopoverContent className="w-[--radix-popover-trigger-width] p-0 bg-gray-800 border-gray-600"><Command><CommandInput placeholder="Search..." /><CommandList><CommandEmpty>No teams found.</CommandEmpty><CommandGroup>
-            {teamOptions.map((t) => (<CommandItem key={t.id} onSelect={() => handleTeamSelect(t)} className="aria-selected:bg-gray-700">
+            {teamOptions.map(t => (<CommandItem key={t.id} onSelect={() => handleTeamSelect(t)}>
                 <Check className={cn("mr-2 h-4 w-4", selectedTeams.some(st => st.id === t.id) ? "opacity-100" : "opacity-0")} />{t.name}
             </CommandItem>))}
         </CommandGroup></CommandList></Command></PopoverContent></Popover>
@@ -193,7 +198,7 @@ export default function StatisticsPage() {
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead className="bg-gray-700/50">
-                  <tr>
+                   <tr>
                     <th className="p-3 text-left font-semibold uppercase tracking-wider">No.</th>
                     <th className="p-3 text-left font-semibold uppercase tracking-wider cursor-pointer" onClick={() => handleSort('hero_name')}>Hero{getSortIndicator('hero_name')}</th>
                     <th className="p-3 text-center font-semibold uppercase tracking-wider cursor-pointer" onClick={() => handleSort('picks')}>Picks{getSortIndicator('picks')}</th>

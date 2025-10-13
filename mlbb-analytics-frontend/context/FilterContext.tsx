@@ -1,14 +1,13 @@
-// In mlbb-analytics-frontend/context/FilterContext.tsx
-
 'use client';
 
 import { createContext, useContext, useState, ReactNode, Dispatch, SetStateAction } from 'react';
 
-// Type definitions for our filters
+// Type definitions
 interface Tournament { id: number; name: string; }
 interface Team { id: number; name: string; }
+export type GroupingMode = 'split' | 'region';
 
-// Define the shape of our context state
+// Context state shape
 interface FilterContextType {
   selectedTournaments: Tournament[];
   setSelectedTournaments: Dispatch<SetStateAction<Tournament[]>>;
@@ -16,16 +15,17 @@ interface FilterContextType {
   setSelectedStages: Dispatch<SetStateAction<string[]>>;
   selectedTeams: Team[];
   setSelectedTeams: Dispatch<SetStateAction<Team[]>>;
+  groupingMode: GroupingMode;
+  setGroupingMode: Dispatch<SetStateAction<GroupingMode>>;
 }
 
-// Create the context with a default value
 const FilterContext = createContext<FilterContextType | undefined>(undefined);
 
-// Create the Provider component that will wrap our application
 export function FilterProvider({ children }: { children: ReactNode }) {
   const [selectedTournaments, setSelectedTournaments] = useState<Tournament[]>([]);
   const [selectedStages, setSelectedStages] = useState<string[]>([]);
   const [selectedTeams, setSelectedTeams] = useState<Team[]>([]);
+  const [groupingMode, setGroupingMode] = useState<GroupingMode>('split');
 
   const value = {
     selectedTournaments,
@@ -34,12 +34,13 @@ export function FilterProvider({ children }: { children: ReactNode }) {
     setSelectedStages,
     selectedTeams,
     setSelectedTeams,
+    groupingMode,
+    setGroupingMode,
   };
 
   return <FilterContext.Provider value={value}>{children}</FilterContext.Provider>;
 }
 
-// Create a custom hook for easy access to the context
 export function useFilters() {
   const context = useContext(FilterContext);
   if (context === undefined) {

@@ -26,19 +26,27 @@ app.add_middleware(
 
 # --- API Endpoints ---
 
-@app.get("/api/tournaments", response_model=list[schemas.Tournament])
-def get_tournaments_endpoint(db: Session = Depends(get_db)):
+@app.get("/api/tournaments")
+def get_tournaments_endpoint(
+    db: Session = Depends(get_db),
+    group_by: Optional[str] = Query('split', enum=['split', 'region'])
+):
     """
-    API endpoint to get a list of all available tournaments for filtering.
+    API endpoint to get a list of tournaments, dynamically grouped.
     """
-    return crud.get_all_tournaments(db)
+    return crud.get_all_tournaments_grouped(db, group_by=group_by)
 
 @app.get("/api/teams", response_model=list[schemas.Team])
 def get_teams_endpoint(
     db: Session = Depends(get_db),
-    tournaments: Optional[List[str]] = Query(None) # Add optional filter
+    tournaments: Optional[List[str]] = Query(None),
+    hero_name: Optional[str] = Query(None) # <-- ADD THIS PARAMETER
 ):
-    return crud.get_all_teams(db, tournament_names=tournaments)
+    return crud.get_all_teams(
+        db, 
+        tournament_names=tournaments, 
+        hero_name=hero_name # <-- PASS IT TO THE CRUD FUNCTION
+    )
 
 @app.get("/api/stages", response_model=list[str])
 def get_stages_endpoint(

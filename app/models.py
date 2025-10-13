@@ -18,11 +18,15 @@ Base = declarative_base()
 
 class Tournament(Base):
     __tablename__ = "tournaments"
+
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, index=True, nullable=False)
-    region = Column(String)
+    name = Column(String, unique=True, index=True)
     
-    # Defines the one-to-many relationship: a Tournament can have many Matches.
+    # --- NEW COLUMNS START ---
+    region = Column(String, index=True)
+    split = Column(String, index=True) 
+    # --- NEW COLUMNS END ---
+
     matches = relationship("Match", back_populates="tournament")
 
 class Team(Base):
